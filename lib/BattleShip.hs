@@ -69,8 +69,8 @@ unsunkShipsLengths brdSecret = map shipLength unsunkShips
         hitSunkCords = map fst $ filter ((== HitSunk) . snd) (history brdSecret)
         unsunkShips = filter (all (`notElem` hitSunkCords) . shipToCords) (board brdSecret)
 
-sinkAllShips :: Int -> Int -> BoardSecret -> IO ()
-sinkAllShips n m brdSecret = do
+sinkAllShips :: BoardSecret -> Int -> Int -> IO ()
+sinkAllShips brdSecret n m = do
     let brdResults = BoardResults { results = [], n = n, m = m }
         shipLengths = unsunkShipsLengths brdSecret
 
@@ -78,19 +78,22 @@ sinkAllShips n m brdSecret = do
     showBoardSecret brdSecret n m
     putStrLn ""
 
+    putStrLn "Current known map is "
+    showBoardResults brdResults
+    putStrLn ""
+
     shootLoop (brdSecret, brdResults) shipLengths
 
 
 shootLoop :: (BoardSecret, BoardResults) -> [Int] -> IO ()
 shootLoop (brdSecret, brdResults) shipLengths = do
-    putStrLn "Current known map is "
-    showBoardResults brdResults
-    putStrLn ""
-
     mbResults <- shootHelper (brdSecret, brdResults) shipLengths
     case mbResults of
         Nothing -> pure ()
-        Just (brdSecret', brdResults') ->
+        Just (brdSecret', brdResults') -> do
+            putStrLn "Current known map is "
+            showBoardResults brdResults'
+            putStrLn ""
             if null (unsunkShipsLengths brdSecret')
             then do
                 putStrLn "Sunk all ships"
