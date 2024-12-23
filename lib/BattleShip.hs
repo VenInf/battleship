@@ -6,7 +6,6 @@ import Data.List (nub, sortOn, subsequences, maximumBy, (\\))
 import List.Shuffle
 import Data.Maybe (fromMaybe, listToMaybe, catMaybes)
 import qualified Data.HashMap.Strict as M
-import Debug.Trace
 import Data.Function (on)
 
 data ShootResult = Hit | Miss | HitSunk deriving (Show, Eq)
@@ -227,31 +226,32 @@ placeRandomShip board len placedShips = do
         notTouchingEntries = filter (\e -> not (isOverlapping e || isTouching e)) potentialEntries
 
         placements = map (uncurry (:)) notTouchingEntries
-        coveringHitsEntries = filter coversHits placements
 
-    pure coveringHitsEntries
+    -- putStrLn $ show board
+
+    pure placements
     where
         isOverlapping (s, ps) = any (shipOverlapsShip s) ps
         isTouching (s, ps) = any (shipTouchesShip s) ps
-
-        coversHits :: [Ship] -> Bool
-        coversHits ships = all coveredByShips hitCords
-            where
-                hitCords = map fst $ filter ((`elem` [Hit, HitSunk]) . snd) (results board)
-                coveredByShips (x, y) = any (\ship -> shipOverlapsPoint ship (x, y)) ships
 
 
 randomValidShipPlacements :: BoardResults -> [Int] -> IO [PlacedShips]
 randomValidShipPlacements board shipLengths = do
     let ships = hitSunkShips board
-    go (shipLengths \\ map shipLength ships) [ships]
-
+    placedShips <- go (shipLengths \\ map shipLength ships) [ships]
+    pure $ filter coversHits placedShips
     where
         go :: [Int] -> [PlacedShips] -> IO [PlacedShips]
         go (l:ls) ships = do
               ships' <- placeRandomShip board l ships
               go ls ships'
         go [] ships = pure ships
+
+        coversHits :: [Ship] -> Bool
+        coversHits ships = all coveredByShips hitCords
+            where
+                hitCords = map fst $ filter ((`elem` [Hit, HitSunk]) . snd) (results board)
+                coveredByShips (x, y) = any (\ship -> shipOverlapsPoint ship (x, y)) ships
 
 heatMap :: BoardResults -> [Int] -> Int -> IO (M.HashMap (Int, Int) Int)
 heatMap board shipLengths sampleLimit = do
