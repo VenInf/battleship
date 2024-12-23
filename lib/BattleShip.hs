@@ -2,11 +2,12 @@
 module BattleShip where
 
 import Control.Monad.State
-import Data.List (nub, sortOn)
+import Data.List (nub, sortOn, subsequences, maximumBy, (\\))
 import List.Shuffle
-import Data.Maybe (fromMaybe, listToMaybe)
+import Data.Maybe (fromMaybe, listToMaybe, catMaybes)
 import qualified Data.HashMap.Strict as M
 import Debug.Trace
+import Data.Function (on)
 
 data ShootResult = Hit | Miss | HitSunk deriving (Show, Eq)
 
@@ -14,7 +15,6 @@ showShootResult :: ShootResult -> String
 showShootResult Hit = "x"
 showShootResult HitSunk = "#"
 showShootResult Miss = "o"
-
 
 data BoardResults = BoardResults { results :: [((Int, Int), ShootResult)]
                                  , n       :: Int -- on the horizontal axis
@@ -24,6 +24,24 @@ data BoardResults = BoardResults { results :: [((Int, Int), ShootResult)]
 data BoardSecret = BoardSecret { board :: PlacedShips
                                , history :: [((Int, Int), ShootResult)]
                                } deriving (Show)
+
+showBoardSecret :: BoardSecret -> Int -> Int -> IO ()
+showBoardSecret brdSecret n m = do
+    let cords = [[(x, y) | x <- [0 .. n - 1]] | y <- [0 .. m - 1]]
+    putStr $ unlines $ map showLine cords
+    where
+        shipPoints = concatMap shipToCords (board brdSecret)
+        showLine :: [(Int, Int)] -> String
+        showLine crds = unwords $ map (\crd -> if crd `elem` shipPoints then "@" else "-" ) crds
+
+showBoardResults :: BoardResults -> IO ()
+showBoardResults brdResults = do
+    let cords = [[(x, y) | x <- [0 .. n brdResults - 1]] | y <- [0 .. m brdResults - 1]]
+    putStr $ unlines $ map showLine cords
+    where
+        knownPoints = results brdResults
+        showLine :: [(Int, Int)] -> String
+        showLine crds = unwords $ map (\crd -> maybe "-" showShootResult (lookup crd knownPoints)) crds
 
 type ShootFn = Int -> Int -> State BoardSecret ShootResult
 
@@ -152,6 +170,12 @@ shipToCords (Ship {..})
     | y1 == y2 = [(x, y1) | x <- [x1 .. x2]]
     | otherwise = error $ "Illegal Ship cords, " ++ show ((x1, y1), (x2, y2))
 
+cordsToShip :: [(Int, Int)] -> Ship
+cordsToShip [] = error "No Ship with no cords"
+cordsToShip cords@((x, y):cs)
+    | all ((== y) . snd) cs = Ship (minimum (map fst cords)) y (maximum (map fst cords)) y
+    | all ((== x) . fst) cs = Ship x (minimum (map snd cords)) x (maximum (map snd cords))
+    | otherwise = error $ "Illegal Ship cords, " ++ show cords
 
 boardShipPlacements :: BoardResults -> Int -> PlacedShips
 boardShipPlacements board len = filter (not . isOnMiss board) legalShipPlacements
@@ -163,16 +187,40 @@ boardShipPlacements board len = filter (not . isOnMiss board) legalShipPlacement
                                                                            , y <- [0 .. m board - 1]]
 
 
-randomValidShipPlacements :: BoardResults -> [Int] -> IO [PlacedShips]
-randomValidShipPlacements _ [] = pure []
-randomValidShipPlacements board [l] = do
-    shuffledPlacements <- shuffleIO $ boardShipPlacements board l
-    pure $ map (:[]) shuffledPlacements
+hitSunkShipOn :: BoardResults -> (Int, Int) -> Maybe Ship
+hitSunkShipOn board (x, y) = case lookup (x, y) (results board) of
+                             Just HitSunk -> Just $ cordsToShip hitShipCords
+                             _ -> Nothing
+    where
+        relevantHitsX = sortOn (snd . fst) $ ((x, y), HitSunk) : filter (\((x2, _), res) -> (res == Hit) && (x == x2)) (results board)
+        relevantHitsY = sortOn (fst . fst) $ ((x, y), HitSunk) : filter (\((_, y2), res) -> (res == Hit) && (y == y2)) (results board)
 
-randomValidShipPlacements board (l:ls) = do
-    shuffledPlacements <- shuffleIO $ boardShipPlacements board l -- One IO call per ship length is acceptable
-    restPlaced <- randomValidShipPlacements board ls
-    let potentialEntries = [(s, ps) | s <- shuffledPlacements, ps <- restPlaced]
+        allShipsOnX = filter (\subseq -> isGoodSequence (map (snd . fst) subseq)
+                                         && elem HitSunk (snd <$> subseq)) $
+                                         subsequences relevantHitsX
+
+
+        allShipsOnY = filter (\subseq -> isGoodSequence (map (fst . fst) subseq)
+                                         && elem HitSunk (snd <$> subseq)) $
+                                         subsequences relevantHitsY
+
+
+        hitShipCords = map fst $ maximumBy (compare `on` length) $ allShipsOnX ++ allShipsOnY
+
+        isGoodSequence (n2:n1:ns) = (n1 == n2 + 1) && isGoodSequence (n1:ns)
+        isGoodSequence _ = True
+
+
+hitSunkShips :: BoardResults -> PlacedShips
+hitSunkShips board = catMaybes mbShips
+    where
+        hitSunkCords = map fst $ filter ((== HitSunk) . snd) (results board)
+        mbShips = map (hitSunkShipOn board) hitSunkCords
+
+placeRandomShip :: BoardResults -> Int -> [PlacedShips] -> IO [PlacedShips]
+placeRandomShip board len placedShips = do
+    shuffledPlacements <- shuffleIO $ boardShipPlacements board len -- One IO call per ship length is acceptable
+    let potentialEntries = [(s, ps) | s <- shuffledPlacements, ps <- placedShips]
         notTouchingEntries = filter (\e -> not (isOverlapping e || isTouching e)) potentialEntries
 
         placements = map (uncurry (:)) notTouchingEntries
@@ -189,8 +237,18 @@ randomValidShipPlacements board (l:ls) = do
                 hitCords = map fst $ filter ((`elem` [Hit, HitSunk]) . snd) (results board)
                 coveredByShips (x, y) = any (\ship -> shipOverlapsPoint ship (x, y)) ships
 
-        coverHitSinkExactly :: [Ship] -> Bool
-        coverHitSinkExactly = undefined
+
+randomValidShipPlacements :: BoardResults -> [Int] -> IO [PlacedShips]
+randomValidShipPlacements board shipLengths = do
+    let ships = hitSunkShips board
+    go (shipLengths \\ map shipLength ships) [ships]
+
+    where
+        go :: [Int] -> [PlacedShips] -> IO [PlacedShips]
+        go (l:ls) ships = do
+              ships' <- placeRandomShip board l ships
+              go ls ships'
+        go [] ships = pure ships
 
 heatMap :: BoardResults -> [Int] -> Int -> IO (M.HashMap (Int, Int) Int)
 heatMap board shipLengths sampleLimit = do
@@ -211,29 +269,10 @@ showHeatMap hMap board = do
         showLine :: [(Int, Int)] -> String
         showLine crds = unwords $ map ((show . fromMaybe 0) . (`M.lookup` hMap)) crds
 
-showBoardSecret :: BoardSecret -> Int -> Int -> IO ()
-showBoardSecret brdSecret n m = do
-    let cords = [[(x, y) | x <- [0 .. n - 1]] | y <- [0 .. m - 1]]
-    putStr $ unlines $ map showLine cords
-    where
-        shipPoints = concatMap shipToCords (board brdSecret)
-        showLine :: [(Int, Int)] -> String
-        showLine crds = unwords $ map (\crd -> if crd `elem` shipPoints then "@" else "-" ) crds
-
-
-showBoardResults :: BoardResults -> IO ()
-showBoardResults brdResults = do
-    let cords = [[(x, y) | x <- [0 .. n brdResults - 1]] | y <- [0 .. m brdResults - 1]]
-    putStr $ unlines $ map showLine cords
-    where
-        knownPoints = results brdResults
-        showLine :: [(Int, Int)] -> String
-        showLine crds = unwords $ map (\crd -> maybe "-" showShootResult (lookup crd knownPoints)) crds
-
 
 bestCords :: BoardResults -> [Int] -> IO (Maybe (Int, Int))
-bestCords brd shipLengths = do -- TODO change to filtering out hit cords
-        hMap <- heatMap brd shipLengths 1000 -- Number of random samples
+bestCords brd shipLengths = do
+        hMap <- heatMap brd shipLengths 10000 -- Number of random samples
         let frequenciesList = sortOn (negate . snd) $ M.toList hMap
             unmarked = filter (\(cords, _) -> cords `notElem` map fst (results brd)) frequenciesList
 
